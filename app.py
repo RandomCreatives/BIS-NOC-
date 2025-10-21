@@ -23,6 +23,18 @@ from utils.data_models import (
     get_note_last_updated,
     get_class_timetable,
     save_class_timetable,
+    # teachers/duties
+    get_teachers,
+    add_teacher,
+    update_teacher,
+    remove_teacher,
+    get_teacher_by_id,
+    update_attendance_from_list,
+    remove_duty,
+    get_marksheet,
+    save_marksheet,
+    assign_duty,
+    get_duties_for_date,
     get_student_attendance_history,
     get_class_attendance_trends,
     search_students,
@@ -240,6 +252,10 @@ def main():
         if st.button("👨‍💼 **Admin Dashboard**", use_container_width=True, type="secondary"):
             st.session_state.selected_class = "Admin"
             st.rerun()
+        # Direct link to Admin Teachers Portal
+        if st.button("👩‍🏫 Teachers Portal (Admin)", use_container_width=True, type="secondary"):
+            st.session_state.selected_class = "AdminTeachers"
+            st.rerun()
         
         st.markdown("---")
         st.subheader("🎨 Classes")
@@ -258,10 +274,26 @@ def main():
     # Quick actions for class view
     if st.session_state.selected_class and st.session_state.selected_class != "Admin":
         show_quick_actions(st.session_state.selected_class)
+
+    # Sidebar: small navigation only (Teachers are managed in Admin Teachers Portal)
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("👩‍🏫 Teachers Portal")
+        st.markdown("Click 'Teachers Portal (Admin)' above to manage teachers and view marksheets.")
     
     # MAIN CONTENT AREA
+    # MAIN CONTENT AREA
+    # If a teacher was selected in the sidebar, show teacher portal
+    if st.session_state.get('selected_teacher'):
+        show_teacher_portal(st.session_state.get('selected_teacher'))
+        return
+
     if st.session_state.selected_class == "Admin":
         show_admin_dashboard()
+    elif st.session_state.selected_class == "AdminTeachers":
+        show_admin_teachers_portal()
+    elif st.session_state.selected_class == "AdminAttendanceReview":
+        show_admin_attendance_review()
     elif st.session_state.selected_class:
         show_class_view()
     else:
@@ -311,6 +343,19 @@ def show_welcome_screen():
         st.metric("Marked Today", f"{marked_today}/{len(st.session_state.classes)}")
     with col4:
         st.metric("Current Time", datetime.datetime.now().strftime("%H:%M"))
+
+    # Show today's duties briefly for teachers to notice
+    st.markdown("---")
+    st.subheader("👩‍🏫 Today's Duties")
+    today = datetime.date.today()
+    duties = get_duties_for_date(today)
+    if duties:
+        for d in duties:
+            teacher = get_teacher_by_id(d.get('teacher_id'))
+            teacher_name = teacher['name'] if teacher else f"ID {d.get('teacher_id')}"
+            st.markdown(f"- {d.get('time')} — {teacher_name} ({d.get('role')})")
+    else:
+        st.info("No duties assigned for today")
 
 def show_class_view():
     """Show class-specific view with enhanced tabs"""
@@ -386,6 +431,20 @@ def show_class_attendance(selected_class):
         r for r in st.session_state.attendance_records 
         if r['class'] == selected_class and r['date'] == selected_date
     ]
+
+    # Monthly summary (read-only for teachers, editable for admin)
+    if st.button("📆 Monthly Summary"):
+        # Show previous month summary modal-like section
+        month_start = (selected_date.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
+        month_end = month_start.replace(day=calendar.monthrange(month_start.year, month_start.month)[1])
+        df = get_attendance_report(selected_class, month_start, month_end)
+        if df.empty:
+            st.info("No attendance data for previous month")
+        else:
+            st.subheader(f"Attendance Summary: {month_start.strftime('%B %Y')}")
+            st.dataframe(df, use_container_width=True)
+            if st.session_state.get('selected_class') == 'Admin':
+                st.warning("Admin can edit records here: select a row and use the edit tools below.")
     
     if existing_records:
         st.success(f"✅ Attendance already marked for {selected_date}")
@@ -951,11 +1010,12 @@ def show_admin_dashboard():
     """Admin Dashboard - FIXED VERSION"""
     st.title("👨‍💼 Admin Dashboard - BIS NOC Campus")
     
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📊 Overview", 
         "📢 Send Messages", 
         "🕒 School Timetable", 
-        "📋 Reports"
+        "📋 Reports",
+        "👩‍🏫 Teachers Portal"
     ])
     
     with tab1:
@@ -969,6 +1029,9 @@ def show_admin_dashboard():
     
     with tab4:
         show_admin_reports()
+
+    with tab5:
+        show_admin_teachers_portal()
 
 def show_admin_overview():
     """Admin overview tab - FIXED delta_color error"""
@@ -1142,6 +1205,169 @@ def show_admin_reports():
                 st.markdown(download_link, unsafe_allow_html=True)
             else:
                 st.warning("No data available for the selected period.")
+
+    # Admin attendance summary (editable) quick access
+    st.markdown("---")
+    st.subheader("🔎 Admin Attendance Summary & Edits")
+    if st.button("📅 Open Monthly Attendance Summary"):
+        st.session_state.selected_class = "AdminAttendanceReview"
+        st.rerun()
+
+def show_admin_teachers_portal():
+    """Admin interface to manage teachers and duties"""
+    st.subheader("👩‍🏫 Teachers Portal (Admin)")
+
+    # Simplified admin teachers panel: four selectboxes horizontally
+    types = ["Main", "Subject", "Assistant", "Special"]
+    teachers = get_teachers()
+    # build mapping by type -> list of (name, id)
+    teachers_by_type = {t: [] for t in types}
+    for t in teachers:
+        t_type = t.get('type') or 'Subject'
+        teachers_by_type.setdefault(t_type, []).append((t.get('name'), t.get('id')))
+
+    cols = st.columns(4)
+    for i, t_type in enumerate(types):
+        with cols[i]:
+            options = ["— Select —"] + [n for n, _id in teachers_by_type.get(t_type, [])]
+            choice = st.selectbox(f"{t_type}", options, key=f"admin_select_{t_type}")
+            if choice and choice != "— Select —":
+                # find id for this name
+                mapping = {n: _id for n, _id in teachers_by_type.get(t_type, [])}
+                selected_id = mapping.get(choice)
+                if selected_id:
+                    st.session_state.selected_teacher = selected_id
+                    st.session_state.selected_subject = None
+                    st.rerun()
+
+    st.markdown("---")
+    st.write("Use the Admin Dashboard (other tabs) to add/remove teachers or manage duties.")
+
+def show_admin_attendance_review():
+    st.subheader("🗂️ Monthly Attendance Review (Admin)")
+    # Choose class and month
+    cls = st.selectbox("Class", st.session_state.classes)
+    month = st.selectbox("Month", list(range(1,13)), index=datetime.date.today().month-1)
+    year = st.number_input("Year", min_value=2020, max_value=2100, value=datetime.date.today().year)
+    if st.button("Load Summary"):
+        start = datetime.date(year, month, 1)
+        end = start.replace(day=calendar.monthrange(year, month)[1])
+        df = get_attendance_report(cls, start, end)
+        if df.empty:
+            st.info("No records for that month")
+        else:
+            st.dataframe(df, use_container_width=True)
+            # Admin can edit: allow CSV download, edit offline and re-upload
+            csv = df.to_csv(index=False)
+            b64 = base64.b64encode(csv.encode()).decode()
+            href = f'<a href="data:file/csv;base64,{b64}" download="{cls}_attendance_{month}_{year}.csv">📥 Download CSV for offline edit</a>'
+            st.markdown(href, unsafe_allow_html=True)
+            st.markdown("---")
+            st.write("📤 Upload edited CSV to apply corrections:")
+            uploaded = st.file_uploader("Upload CSV", type=['csv'])
+            if uploaded:
+                try:
+                    edited_df = pd.read_csv(uploaded)
+                    records = edited_df.to_dict(orient='records')
+                    if st.button("Apply Edits"):
+                        ok = update_attendance_from_list(records)
+                        if ok:
+                            st.success("Attendance records updated")
+                        else:
+                            st.error("Failed to update records")
+                except Exception as e:
+                    st.error(f"Invalid CSV: {e}")
+    # Note: no recursive self-call here
+
+
+def show_teacher_portal(teacher_id):
+    """Teacher-facing portal (sidebar) - list classes/subjects and marksheet editor"""
+    teacher = get_teacher_by_id(teacher_id)
+    if not teacher:
+        st.error("Teacher not found")
+        return
+
+    st.title(f"👩‍🏫 {teacher.get('name')}")
+    st.subheader(f"{teacher.get('type')} Teacher")
+    subj_options = teacher.get('subjects') or []
+    # Determine classes they can manage: explicit 'classes' field for main/subject teachers; otherwise all classes
+    classes_for_teacher = teacher.get('classes') if teacher.get('classes') else st.session_state.classes
+
+    st.markdown("---")
+    st.subheader("📘 Subjects & Marksheets")
+
+    if not subj_options:
+        st.info("No subjects assigned. Ask admin to assign subjects in Admin Teachers Portal.")
+        if st.button("⬅️ Back"):
+            st.session_state.selected_teacher = None
+            st.rerun()
+        return
+
+    # Show subject buttons. When clicked, set selected_subject in session state.
+    if 'selected_subject' not in st.session_state or st.session_state.get('selected_subject_teacher') != teacher_id:
+        # initialize subject selection for this teacher
+        st.session_state.selected_subject = None
+        st.session_state.selected_subject_teacher = teacher_id
+
+    # If no subject selected, show list of subjects as buttons
+    if not st.session_state.get('selected_subject'):
+        st.write("Click a subject to view marksheets for classes the teacher handles.")
+        cols = st.columns(2)
+        for i, subj in enumerate(subj_options):
+            col = cols[i % 2]
+            with col:
+                if st.button(f"📚 {subj}", key=f"subj_btn_{teacher_id}_{subj}"):
+                    st.session_state.selected_subject = subj
+                    st.rerun()
+        if st.button("⬅️ Back"):
+            st.session_state.selected_teacher = None
+            st.rerun()
+        return
+
+    # If a subject is selected, show classes and marksheets for that subject
+    subj = st.session_state.get('selected_subject')
+    st.write(f"Showing marksheets for **{subj}**")
+    st.write(f"Classes: {', '.join(classes_for_teacher)}")
+
+    # For each class show a tab (each tab is a separate marksheet)
+    class_tabs = st.tabs(classes_for_teacher)
+    for i, cls in enumerate(classes_for_teacher):
+        with class_tabs[i]:
+            # Load marksheet or initialize
+            ms_df = get_marksheet(teacher_id, cls, subj)
+            if ms_df is None or ms_df.empty:
+                students = get_class_students(cls)
+                if not students.empty:
+                    ms_df = students[['id','roll_number','name']].copy()
+                    ms_df = ms_df.rename(columns={'id':'student_id'})
+                    # default assessment columns
+                    for col in ['quiz1','midterm','final']:
+                        if col not in ms_df.columns:
+                            ms_df[col] = ''
+                else:
+                    ms_df = pd.DataFrame(columns=['student_id','roll_number','name','quiz1','midterm','final'])
+
+            edited = st.data_editor(
+                ms_df,
+                use_container_width=True,
+                num_rows='dynamic',
+                key=f"marksheet_editor_{teacher_id}_{cls}_{subj}"
+            )
+
+            if st.button("💾 Save Marksheet", key=f"save_ms_{teacher_id}_{cls}_{subj}"):
+                df_to_save = edited.copy()
+                # Normalize columns
+                if 'id' in df_to_save.columns and 'student_id' not in df_to_save.columns:
+                    df_to_save = df_to_save.rename(columns={'id':'student_id'})
+                save_marksheet(teacher_id, cls, subj, df_to_save)
+                st.success("✅ Marksheet saved")
+                st.rerun()
+
+    # Back button to subject list
+    if st.button("⬅️ Back to Subjects"):
+        st.session_state.selected_subject = None
+        st.rerun()
+
 
 if __name__ == "__main__":
     main()

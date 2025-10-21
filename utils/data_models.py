@@ -14,6 +14,8 @@ ATTENDANCE_FILE = DATA_DIR / "attendance_records.csv"
 STUDENTS_FILE = DATA_DIR / "students.csv"
 NOTES_FILE = DATA_DIR / "daily_notes.csv"
 TIMETABLES_FILE = DATA_DIR / "class_timetables.json"
+TEACHERS_FILE = DATA_DIR / "teachers.csv"
+DUTIES_FILE = DATA_DIR / "duties.csv"
 
 def initialize_session_state():
     """Initialize all session state variables"""
@@ -44,6 +46,18 @@ def initialize_session_state():
 
     if 'daily_notes' not in st.session_state:
         st.session_state.daily_notes = load_daily_notes_from_disk()
+
+    # Load teachers and duties
+    if 'teachers' not in st.session_state:
+        st.session_state.teachers = load_teachers_from_disk() or []
+
+    if 'duties' not in st.session_state:
+        st.session_state.duties = load_duties_from_disk() or {}
+
+    # Load marksheets (per teacher -> class -> subject -> dataframe)
+    if 'marksheets' not in st.session_state:
+        loaded_ms = load_marksheets_from_disk()
+        st.session_state.marksheets = loaded_ms if loaded_ms is not None else {}
 
     # Ensure data directory exists for persistence
     try:
@@ -274,6 +288,7 @@ def get_attendance_report(class_name, start_date, end_date):
             'Roll Number': record['roll_number'],
             'Status': record['status'],
             'Notes': record.get('notes', ''),
+            'Timestamp': record.get('timestamp', ''),
             'Class': record['class']
         })
     
@@ -307,6 +322,58 @@ def get_all_classes_report(start_date, end_date):
         })
     
     return pd.DataFrame(report_data)
+
+
+def update_attendance_from_list(records_list):
+    """Update session attendance records from a list of record dicts (admin edits).
+    Each record should include student_id, class, date, status, notes and timestamp(optional).
+    This will replace matching records (by class, date, student_id) and append new ones.
+    """
+    try:
+        if 'attendance_records' not in st.session_state:
+            st.session_state.attendance_records = []
+
+        # Normalize input list
+        normalized = []
+        for rec in records_list:
+            r = dict(rec)
+            d = r.get('date')
+            # convert string dates to date
+            if isinstance(d, str):
+                try:
+                    r['date'] = datetime.strptime(d, "%Y-%m-%d").date()
+                except Exception:
+                    try:
+                        r['date'] = datetime.fromisoformat(d).date()
+                    except Exception:
+                        r['date'] = date.today()
+            normalized.append(r)
+
+        # Build index for quick replacement
+        existing = st.session_state.attendance_records
+        # Create a map key -> record where key = (class, date, student_id)
+        existing_map = {(e['class'], e['date'], e['student_id']): e for e in existing}
+
+        for r in normalized:
+            key = (r.get('class'), r.get('date'), r.get('student_id'))
+            # ensure timestamp
+            if 'timestamp' not in r or not r['timestamp']:
+                r['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            if key in existing_map:
+                # replace fields
+                existing_map[key].update(r)
+            else:
+                existing_map[key] = r
+
+        # Write back to session list
+        st.session_state.attendance_records = list(existing_map.values())
+        # Persist to disk
+        save_attendance_to_disk(st.session_state.attendance_records)
+        return True
+    except Exception as e:
+        print(f"Error updating attendance records: {e}")
+        return False
 
 # STUDENT MANAGEMENT FUNCTIONS
 
@@ -398,6 +465,333 @@ def save_students_to_disk():
         st.session_state.students_df.to_csv(STUDENTS_FILE, index=False)
     except Exception as e:
         print(f"Could not save students: {e}")
+
+
+def save_teachers_to_disk():
+    """Save teachers list to CSV"""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        teachers = st.session_state.get('teachers', [])
+        if teachers:
+            # Convert list fields to comma-separated strings for CSV
+            serializable = []
+            for t in teachers:
+                tt = dict(t)
+                if isinstance(tt.get('subjects'), (list, tuple)):
+                    tt['subjects'] = ','.join(tt.get('subjects'))
+                if isinstance(tt.get('classes'), (list, tuple)):
+                    tt['classes'] = ','.join(tt.get('classes'))
+                serializable.append(tt)
+            df = pd.DataFrame(serializable)
+            df.to_csv(TEACHERS_FILE, index=False)
+    except Exception as e:
+        print(f"Could not save teachers: {e}")
+
+
+def save_marksheets_to_disk():
+    """Persist marksheets (nested dict) to JSON file"""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        to_save = st.session_state.get('marksheets', {})
+        # Convert any DataFrame values to records
+        serializable = {}
+        for teacher_id, by_class in to_save.items():
+            serializable[str(teacher_id)] = {}
+            for class_name, subjects in by_class.items():
+                serializable[str(teacher_id)][class_name] = {}
+                for subject, df in subjects.items():
+                    if hasattr(df, 'to_dict'):
+                        serializable[str(teacher_id)][class_name][subject] = df.to_dict(orient='records')
+                    else:
+                        serializable[str(teacher_id)][class_name][subject] = df
+
+        path = DATA_DIR / 'marksheets.json'
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Could not save marksheets: {e}")
+
+
+def load_marksheets_from_disk():
+    try:
+        path = DATA_DIR / 'marksheets.json'
+        if path.exists():
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # Convert back to DataFrames where appropriate
+            result = {}
+            for teacher_id, by_class in data.items():
+                result[int(teacher_id)] = {}
+                for class_name, subjects in by_class.items():
+                    result[int(teacher_id)][class_name] = {}
+                    for subject, records in subjects.items():
+                        try:
+                            df = pd.DataFrame(records)
+                        except Exception:
+                            df = pd.DataFrame()
+                        result[int(teacher_id)][class_name][subject] = df
+            return result
+    except Exception as e:
+        print(f"Could not load marksheets: {e}")
+    return None
+
+
+def get_marksheet(teacher_id, class_name, subject):
+    """Return a DataFrame marksheet for the teacher/class/subject. Empty DataFrame if none."""
+    marksheets = st.session_state.get('marksheets', {})
+    teacher_ms = marksheets.get(teacher_id, {})
+    class_ms = teacher_ms.get(class_name, {})
+    df = class_ms.get(subject)
+    if df is None:
+        return pd.DataFrame()
+    return df
+
+
+def save_marksheet(teacher_id, class_name, subject, df):
+    """Save a marksheet DataFrame into session state and persist to disk."""
+    if 'marksheets' not in st.session_state:
+        st.session_state.marksheets = {}
+    ms = st.session_state.marksheets
+    ms.setdefault(teacher_id, {})
+    ms[teacher_id].setdefault(class_name, {})
+    ms[teacher_id][class_name][subject] = df
+    st.session_state.marksheets = ms
+    # Persist
+    try:
+        save_marksheets_to_disk()
+    except Exception as e:
+        print(f"Could not persist marksheets: {e}")
+
+
+def load_teachers_from_disk():
+    """Load teachers list from CSV"""
+    try:
+        if TEACHERS_FILE.exists():
+            df = pd.read_csv(TEACHERS_FILE)
+            records = df.to_dict(orient='records')
+            # Normalize subjects and classes into lists
+            normalized = []
+            for r in records:
+                tr = dict(r)
+                # ensure id is int
+                try:
+                    tr['id'] = int(tr.get('id'))
+                except Exception:
+                    pass
+                # subjects/classes: try multiple parsing strategies because CSV may contain
+                # JSON-like strings, Python repr lists, or simple comma-separated strings.
+                import json as _json
+                import ast as _ast
+
+                def _parse_list_field(value):
+                    # None or NaN
+                    if value is None or (isinstance(value, float) and pd.isna(value)):
+                        return []
+                    if isinstance(value, list):
+                        return value
+                    if isinstance(value, str):
+                        v = value.strip()
+                        # Try JSON first
+                        try:
+                            parsed = _json.loads(v)
+                            if isinstance(parsed, list):
+                                return [str(x).strip() for x in parsed]
+                        except Exception:
+                            pass
+                        # Try Python literal eval (e.g. "['A','B']" or "["['A']"]" mess)
+                        try:
+                            parsed = _ast.literal_eval(v)
+                            if isinstance(parsed, (list, tuple)):
+                                return [str(x).strip() for x in parsed]
+                        except Exception:
+                            pass
+                        # Fallback: remove surrounding brackets and quotes then split by comma
+                        cleaned = v
+                        for ch in ['[', ']', '"', "'"]:
+                            cleaned = cleaned.replace(ch, '')
+                        parts = [p.strip() for p in cleaned.split(',') if p.strip()]
+                        return parts
+                    # Unknown type -> return empty list
+                    return []
+
+                subs = tr.get('subjects')
+                tr['subjects'] = _parse_list_field(subs)
+
+                classes = tr.get('classes') if 'classes' in tr else None
+                tr['classes'] = _parse_list_field(classes)
+
+                normalized.append(tr)
+            return normalized
+    except Exception as e:
+        print(f"Could not load teachers: {e}")
+    return None
+
+
+def add_teacher(teacher):
+    """Add a teacher record. teacher is a dict with keys: id, name, type, subjects(list)"""
+    try:
+        teachers = st.session_state.get('teachers', [])
+        max_id = max((t.get('id', 0) for t in teachers), default=0)
+        teacher['id'] = max_id + 1
+        # ensure subjects is list
+        subs = teacher.get('subjects')
+        if isinstance(subs, str):
+            teacher['subjects'] = [s.strip() for s in subs.split(',') if s.strip()]
+        elif subs is None:
+            teacher['subjects'] = []
+        # ensure classes is list
+        cls = teacher.get('classes')
+        if isinstance(cls, str):
+            teacher['classes'] = [c.strip() for c in cls.split(',') if c.strip()]
+        elif cls is None:
+            teacher['classes'] = []
+        teachers.append(teacher)
+        st.session_state.teachers = teachers
+        save_teachers_to_disk()
+        return teacher['id']
+    except Exception as e:
+        print(f"Error adding teacher: {e}")
+        return None
+
+
+def update_teacher(teacher_id, updates):
+    """Update teacher fields by id"""
+    try:
+        teachers = st.session_state.get('teachers', [])
+        for t in teachers:
+            if t.get('id') == teacher_id:
+                t.update(updates)
+                # normalize subjects
+                if 'subjects' in updates:
+                    subs = t.get('subjects')
+                    if isinstance(subs, str):
+                        t['subjects'] = [s.strip() for s in subs.split(',') if s.strip()]
+                    elif subs is None:
+                        t['subjects'] = []
+                if 'classes' in updates:
+                    cls = t.get('classes')
+                    if isinstance(cls, str):
+                        t['classes'] = [c.strip() for c in cls.split(',') if c.strip()]
+                    elif cls is None:
+                        t['classes'] = []
+                save_teachers_to_disk()
+                return True
+    except Exception as e:
+        print(f"Error updating teacher: {e}")
+    return False
+
+
+def remove_teacher(teacher_id):
+    """Remove teacher by id"""
+    try:
+        teachers = st.session_state.get('teachers', [])
+        new_list = [t for t in teachers if t.get('id') != teacher_id]
+        st.session_state.teachers = new_list
+        save_teachers_to_disk()
+        return True
+    except Exception as e:
+        print(f"Error removing teacher: {e}")
+        return False
+
+
+def get_teachers(teacher_type=None):
+    """Return list of teachers, optionally filtered by type"""
+    teachers = st.session_state.get('teachers', [])
+    if teacher_type:
+        return [t for t in teachers if t.get('type') == teacher_type]
+    return teachers
+
+
+def get_teacher_by_id(teacher_id):
+    for t in st.session_state.get('teachers', []):
+        if t.get('id') == teacher_id:
+            return t
+    return None
+
+
+def save_duties_to_disk():
+    """Save duties mapping (date -> list of assignments) to CSV"""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        duties = st.session_state.get('duties', {})
+        rows = []
+        for date_key, assignments in duties.items():
+            for a in assignments:
+                rows.append({
+                    'date': date_key,
+                    'time': a.get('time'),
+                    'teacher_id': a.get('teacher_id'),
+                    'role': a.get('role')
+                })
+        if rows:
+            df = pd.DataFrame(rows)
+            df.to_csv(DUTIES_FILE, index=False)
+    except Exception as e:
+        print(f"Could not save duties: {e}")
+
+
+def load_duties_from_disk():
+    """Load duties mapping from CSV"""
+    try:
+        if DUTIES_FILE.exists():
+            df = pd.read_csv(DUTIES_FILE)
+            duties = {}
+            for _, row in df.iterrows():
+                date_key = row['date']
+                duties.setdefault(date_key, [])
+                duties[date_key].append({
+                    'time': row.get('time'),
+                    'teacher_id': int(row.get('teacher_id')) if not pd.isna(row.get('teacher_id')) else None,
+                    'role': row.get('role')
+                })
+            return duties
+    except Exception as e:
+        print(f"Could not load duties: {e}")
+    return None
+
+
+def assign_duty(date_key, time_slot, teacher_id, role):
+    """Assign a duty to a teacher for a date and time slot"""
+    try:
+        duties = st.session_state.get('duties', {})
+        duties.setdefault(str(date_key), [])
+        duties[str(date_key)].append({
+            'time': time_slot,
+            'teacher_id': teacher_id,
+            'role': role
+        })
+        st.session_state.duties = duties
+        save_duties_to_disk()
+        return True
+    except Exception as e:
+        print(f"Error assigning duty: {e}")
+        return False
+
+
+def remove_duty(date_key, teacher_id, time_slot=None, role=None):
+    """Remove duty assignment"""
+    try:
+        duties = st.session_state.get('duties', {})
+        key = str(date_key)
+        if key not in duties:
+            return False
+        new_list = []
+        for a in duties[key]:
+            if a.get('teacher_id') == teacher_id and (time_slot is None or a.get('time') == time_slot) and (role is None or a.get('role') == role):
+                continue
+            new_list.append(a)
+        duties[key] = new_list
+        st.session_state.duties = duties
+        save_duties_to_disk()
+        return True
+    except Exception as e:
+        print(f"Error removing duty: {e}")
+        return False
+
+
+def get_duties_for_date(date_key):
+    return st.session_state.get('duties', {}).get(str(date_key), [])
+
 
 def load_students_from_disk():
     """Load students from CSV if available"""
