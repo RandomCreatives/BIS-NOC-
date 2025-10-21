@@ -3,7 +3,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
 import streamlit as st
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import time
 
 class GoogleSheetsManager:

@@ -329,10 +329,10 @@ def add_student_to_class(class_name, student_data):
         max_id = st.session_state.students_df['id'].max() if not st.session_state.students_df.empty else 0
         new_id = max_id + 1
         
-        # Create roll number
-        class_prefix = class_name.replace('Year 3 - ', '').upper()[:3]
+        # Create roll number consistent with initial dataset (last 3 chars of class name)
+        class_suffix = class_name[-3:]
         existing_students = get_class_students(class_name)
-        new_roll_number = f"{class_prefix}-{len(existing_students) + 1:02d}"
+        new_roll_number = f"{class_suffix}-{len(existing_students) + 1:02d}"
         
         new_student = {
             "id": new_id,
@@ -410,58 +410,76 @@ def load_students_from_disk():
 
 # DAILY NOTES FUNCTIONS
 
-def save_daily_note(class_name, date, note_text):
+def save_daily_note(class_name, note_date, note_text):
     """Save daily note for a class"""
     if 'daily_notes' not in st.session_state:
         st.session_state.daily_notes = {}
-    
-    # Normalize date
-    if isinstance(date, str):
+
+    # Normalize date input to a datetime.date
+    if isinstance(note_date, str):
         try:
-            date = datetime.strptime(date, "%Y-%m-%d").date()
+            normalized_date = datetime.strptime(note_date, "%Y-%m-%d").date()
         except Exception:
-            date = date.today()
-    
-    key = f"{class_name}_{date}"
+            normalized_date = date.today()
+    elif isinstance(note_date, datetime):
+        normalized_date = note_date.date()
+    elif isinstance(note_date, date):
+        normalized_date = note_date
+    else:
+        normalized_date = date.today()
+
+    key = f"{class_name}_{normalized_date.isoformat()}"
     st.session_state.daily_notes[key] = {
         "text": note_text,
         "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "class": class_name,
-        "date": date.isoformat() if isinstance(date, date) else str(date)
+        "date": normalized_date.isoformat()
     }
-    
+
     # Persist to disk
     save_daily_notes_to_disk()
 
-def get_daily_note(class_name, date):
+def get_daily_note(class_name, note_date):
     """Get daily note for a class and date"""
     if 'daily_notes' not in st.session_state:
         return ""
-    
+
     # Normalize date
-    if isinstance(date, str):
+    if isinstance(note_date, str):
         try:
-            date = datetime.strptime(date, "%Y-%m-%d").date()
+            normalized_date = datetime.strptime(note_date, "%Y-%m-%d").date()
         except Exception:
-            date = date.today()
-    
-    key = f"{class_name}_{date}"
+            normalized_date = date.today()
+    elif isinstance(note_date, datetime):
+        normalized_date = note_date.date()
+    elif isinstance(note_date, date):
+        normalized_date = note_date
+    else:
+        normalized_date = date.today()
+
+    key = f"{class_name}_{normalized_date.isoformat()}"
     note_data = st.session_state.daily_notes.get(key, {})
     return note_data.get("text", "")
 
-def get_note_last_updated(class_name, date):
+def get_note_last_updated(class_name, note_date):
     """Get when the note was last updated"""
     if 'daily_notes' not in st.session_state:
         return ""
-    
+
     # Normalize date
-    if isinstance(date, str):
+    if isinstance(note_date, str):
         try:
-            date = datetime.strptime(date, "%Y-%m-%d").date()
+            normalized_date = datetime.strptime(note_date, "%Y-%m-%d").date()
         except Exception:
-            date = date.today()
-    
-    key = f"{class_name}_{date}"
+            normalized_date = date.today()
+    elif isinstance(note_date, datetime):
+        normalized_date = note_date.date()
+    elif isinstance(note_date, date):
+        normalized_date = note_date
+    else:
+        normalized_date = date.today()
+
+    key = f"{class_name}_{normalized_date.isoformat()}"
     note_data = st.session_state.daily_notes.get(key, {})
     return note_data.get("last_updated", "")
 
