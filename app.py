@@ -4,6 +4,7 @@ import pandas as pd
 import datetime
 import calendar
 import base64
+import io
 from utils.data_models import (
     initialize_session_state, 
     save_attendance, 
@@ -256,6 +257,10 @@ def main():
         if st.button("👩‍🏫 Teachers Portal (Admin)", use_container_width=True, type="secondary"):
             st.session_state.selected_class = "AdminTeachers"
             st.rerun()
+        # Public teachers portal (teacher-facing)
+        if st.button("👩‍🏫 Teachers (Portal)", use_container_width=True, type="secondary"):
+            st.session_state.selected_class = "TeachersPortal"
+            st.rerun()
         
         st.markdown("---")
         st.subheader("🎨 Classes")
@@ -278,8 +283,19 @@ def main():
     # Sidebar: small navigation only (Teachers are managed in Admin Teachers Portal)
     with st.sidebar:
         st.markdown("---")
-        st.subheader("👩‍🏫 Teachers Portal")
-        st.markdown("Click 'Teachers Portal (Admin)' above to manage teachers and view marksheets.")
+        st.subheader("👩‍🏫 Teachers")
+        st.markdown("Use **Teachers (Portal)** to view teacher subjects and marksheets (teacher-facing). Use **Teachers Portal (Admin)** to manage teachers, duties and admin tasks.")
+    
+    # Student Services section (lower sidebar)
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("🏥 Student Services")
+        if st.button("📚 Library", use_container_width=True, key="svc_library"):
+            st.session_state.selected_class = "StudentService_Library"
+            st.rerun()
+        if st.button("🚑 Clinic", use_container_width=True, key="svc_clinic"):
+            st.session_state.selected_class = "StudentService_Clinic"
+            st.rerun()
     
     # MAIN CONTENT AREA
     # MAIN CONTENT AREA
@@ -292,6 +308,12 @@ def main():
         show_admin_dashboard()
     elif st.session_state.selected_class == "AdminTeachers":
         show_admin_teachers_portal()
+    elif st.session_state.selected_class == "TeachersPortal":
+        show_teachers_portal_public()
+    elif st.session_state.selected_class == "StudentService_Library":
+        show_library_service()
+    elif st.session_state.selected_class == "StudentService_Clinic":
+        show_clinic_service()
     elif st.session_state.selected_class == "AdminAttendanceReview":
         show_admin_attendance_review()
     elif st.session_state.selected_class:
@@ -1241,7 +1263,354 @@ def show_admin_teachers_portal():
                     st.rerun()
 
     st.markdown("---")
-    st.write("Use the Admin Dashboard (other tabs) to add/remove teachers or manage duties.")
+    # Two-column area: Add Teacher (left) and Assign Duty (right)
+    left_col, right_col = st.columns([1, 1])
+
+    # ---- Add Teacher ----
+    with left_col:
+        st.subheader("➕ Add Teacher")
+        with st.form("admin_add_teacher_form"):
+            name = st.text_input("Name", key="add_teacher_name")
+            teacher_type = st.selectbox("Type", types, key="add_teacher_type")
+            subjects = st.text_input("Subjects (comma separated)", placeholder="Math, Science", key="add_teacher_subjects")
+            # allow selecting existing classes or entering freely
+            classes_selected = st.multiselect("Classes (choose existing)", st.session_state.get('classes', []), key="add_teacher_classes")
+            classes_free = st.text_input("Or enter classes (comma separated)", placeholder="Year 3 - Blue, Year 3 - Green", key="add_teacher_classes_free")
+            submitted = st.form_submit_button("➕ Add Teacher")
+            if submitted:
+                if not name.strip():
+                    st.error("Please provide a teacher name")
+                else:
+                    teacher_obj = {
+                        'name': name.strip(),
+                        'type': teacher_type,
+                        'subjects': [s.strip() for s in subjects.split(',') if s.strip()]
+                    }
+                    # merge classes from multiselect and free text
+                    classes_list = []
+                    if classes_selected:
+                        classes_list.extend(classes_selected)
+                    if classes_free and classes_free.strip():
+                        classes_list.extend([c.strip() for c in classes_free.split(',') if c.strip()])
+                    if classes_list:
+                        teacher_obj['classes'] = classes_list
+
+                    added_id = add_teacher(teacher_obj)
+                    if added_id:
+                        st.success(f"Teacher added (ID: {added_id})")
+                        st.rerun()
+                    else:
+                        st.error("Failed to add teacher")
+
+    # ---- Assign Duty ----
+    with right_col:
+        st.subheader("🕒 Assign Duties")
+        duty_date = st.date_input("Date", datetime.date.today(), key="admin_duty_date")
+        time_slot = st.selectbox("Time Slot", ["Snack Time", "Lunch Time", "Home Time"], key="admin_time_slot")
+        teacher_list = get_teachers()
+        teacher_options = {t['name']: t['id'] for t in teacher_list}
+        selected_teacher_names = st.multiselect("Teacher(s)", list(teacher_options.keys()), key="assign_duty_teachers")
+        role = st.text_input("Role/Notes", value=time_slot, key="assign_duty_role")
+        if st.button("Assign Duty") and selected_teacher_names:
+            for tname in selected_teacher_names:
+                tid = teacher_options.get(tname)
+                try:
+                    assign_duty(duty_date, time_slot, tid, role)
+                except Exception as e:
+                    st.error(f"Failed to assign duty to {tname}: {e}")
+            st.success("Duty(ies) assigned")
+            st.rerun()
+
+        st.markdown("**Assigned Duties**")
+        duties = get_duties_for_date(duty_date)
+        if duties:
+            for idx, a in enumerate(duties):
+                teacher = get_teacher_by_id(a.get('teacher_id'))
+                name = teacher['name'] if teacher else f"ID {a.get('teacher_id')}"
+                colA, colB = st.columns([8, 1])
+                with colA:
+                    st.write(f"{a.get('time')} — **{name}** ({a.get('role')})")
+                with colB:
+                    remove_key = f"remove_duty_{duty_date}_{idx}"
+                    if st.button("Remove", key=remove_key):
+                        # set a confirmation flag in session state to show confirm button
+                        st.session_state[f"confirm_{remove_key}"] = True
+                        st.rerun()
+
+                # confirmation flow
+                if st.session_state.get(f"confirm_{remove_key}"):
+                    if st.button("Confirm Remove", key=f"confirm_{remove_key}_btn"):
+                        removed = remove_duty(duty_date, a.get('teacher_id'), time_slot=a.get('time'))
+                        if removed:
+                            st.success("Duty removed")
+                            # clear the confirmation flag
+                            st.session_state.pop(f"confirm_{remove_key}", None)
+                            st.rerun()
+                        else:
+                            st.error("Failed to remove duty")
+        else:
+            st.info("No duties assigned for this date")
+
+
+def show_teachers_portal_public():
+    """Public/teacher-facing portal: list teachers so a teacher can view their subjects and marksheets."""
+    st.title("👩‍🏫 Teachers Portal")
+    st.subheader("Teacher access: view your subjects & marksheets")
+
+    types = ["Main", "Subject", "Assistant", "Special"]
+    teachers = get_teachers()
+    teachers_by_type = {t: [] for t in types}
+    for t in teachers:
+        t_type = t.get('type') or 'Subject'
+        teachers_by_type.setdefault(t_type, []).append((t.get('name'), t.get('id')))
+
+    st.markdown("Click a teacher to open their portal (read-only view).")
+    for t_type in types:
+        with st.expander(f"{t_type} Teachers", expanded=False):
+            entries = teachers_by_type.get(t_type, [])
+            if not entries:
+                st.info("No teachers in this category yet.")
+                continue
+            for name, tid in entries:
+                if st.button(name, key=f"public_teacher_{tid}"):
+                    st.session_state.selected_teacher = tid
+                    # ensure subject selection resets for the teacher
+                    st.session_state.selected_subject = None
+                    st.session_state.selected_subject_teacher = tid
+                    st.rerun()
+
+    if st.button("⬅️ Back to Home"):
+        st.session_state.selected_class = None
+        st.rerun()
+
+
+def show_library_service():
+    """Library service dashboard: search, calendar, today's list, weekly/monthly summaries, download"""
+    st.title("📚 Library Service")
+
+    # Ensure library records exist in session state
+    if 'library_records' not in st.session_state:
+        # Each record: {'date': date, 'student_name': str, 'class': str, 'book': str, 'action': 'borrowed'|'returned'}
+        st.session_state.library_records = []
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        search_q = st.text_input("Search by student name or class color", key="lib_search")
+    with col2:
+        selected_date = st.date_input("Select Date", datetime.date.today(), key="lib_date")
+
+    # Add new record form
+    with st.expander("➕ Add Borrow/Return Record"):
+        with st.form("lib_add_form"):
+            r_date = st.date_input("Date", datetime.date.today())
+            student_name = st.text_input("Student Name")
+            student_class = st.selectbox("Class (or color)", options=st.session_state.get('classes', []))
+            book_name = st.text_input("Book Title")
+            action = st.selectbox("Action", ["borrowed", "returned"])
+            if st.form_submit_button("Add Record"):
+                if not student_name.strip() or not book_name.strip():
+                    st.error("Please provide student name and book title")
+                else:
+                    st.session_state.library_records.append({
+                        'date': r_date,
+                        'student_name': student_name.strip(),
+                        'class': student_class,
+                        'book': book_name.strip(),
+                        'action': action
+                    })
+                    st.success("Record added")
+                    st.rerun()
+
+    st.markdown("---")
+
+    # Filter records
+    records = st.session_state.library_records
+    if search_q:
+        q = search_q.strip().lower()
+        records = [r for r in records if q in r['student_name'].lower() or q in (r.get('class','').lower())]
+
+    # Today's list
+    st.subheader(f"📋 Records for {selected_date}")
+    todays = [r for r in records if r['date'] == selected_date]
+    if todays:
+        for i, r in enumerate(todays):
+            colA, colB = st.columns([8,1])
+            with colA:
+                st.write(f"{r['date']} — {r['student_name']} ({r['class']}) — {r['book']} — {r['action']}")
+            with colB:
+                # If this record is a borrow and not yet returned, offer Return button
+                if r['action'] == 'borrowed':
+                    key = f"return_{selected_date}_{i}"
+                    if st.button("Return", key=key):
+                        # create a returned record for today for the same student/book
+                        st.session_state.library_records.append({
+                            'date': selected_date,
+                            'student_name': r['student_name'],
+                            'class': r.get('class',''),
+                            'book': r['book'],
+                            'action': 'returned'
+                        })
+                        st.success(f"Marked {r['student_name']} as returned {r['book']}")
+                        st.rerun()
+    else:
+        st.info("No records for this date")
+
+    # Weekly summary (last 7 days)
+    st.markdown("---")
+    st.subheader("📈 Weekly Summary")
+    today = datetime.date.today()
+    week_start = today - datetime.timedelta(days=6)
+    week_records = [r for r in st.session_state.library_records if week_start <= r['date'] <= today]
+    if week_records:
+        df_week = pd.DataFrame(week_records)
+        st.dataframe(df_week[['date','student_name','class','book','action']], use_container_width=True)
+    else:
+        st.info("No records in the last 7 days")
+
+    # Monthly summary
+    st.markdown("---")
+    st.subheader("📊 Monthly Summary")
+    month_start = today.replace(day=1)
+    month_records = [r for r in st.session_state.library_records if r['date'] >= month_start and r['date'] <= today]
+    if month_records:
+        df_month = pd.DataFrame(month_records)
+        st.dataframe(df_month[['date','student_name','class','book','action']], use_container_width=True)
+    else:
+        st.info("No records this month yet")
+
+    # Download option (CSV)
+    st.markdown("---")
+    st.subheader("📥 Download")
+    if st.button("Download CSV"):
+        if st.session_state.library_records:
+            df_all = pd.DataFrame(st.session_state.library_records)
+            csv = df_all.to_csv(index=False)
+            b64 = base64.b64encode(csv.encode()).decode()
+            href = f'<a href="data:file/csv;base64,{b64}" download="library_records.csv">📥 Download library_records.csv</a>'
+            st.markdown(href, unsafe_allow_html=True)
+        else:
+            st.info("No records to download")
+
+
+def show_clinic_service():
+    """Clinic service: record student/staff visits, cases, treatments; daily/weekly/monthly reports; downloads."""
+    st.title("🚑 Clinic Service")
+
+    # Ensure clinic records exist in session state
+    if 'clinic_records' not in st.session_state:
+        # Each record: {'date': date, 'person_type': 'student'|'staff', 'name': str, 'class': str, 'case': str, 'treatment': str}
+        st.session_state.clinic_records = []
+
+    # Top controls: person type and date
+    col1, col2, col3 = st.columns([1,1,1])
+    with col1:
+        person_type = st.selectbox("Record for:", ["Student", "Staff"], key="clinic_person_type")
+    with col2:
+        record_date = st.date_input("Date", datetime.date.today(), key="clinic_date")
+    with col3:
+        search_q = st.text_input("Search by name or class", key="clinic_search")
+
+    # Form for adding a clinic record
+    with st.expander("➕ Add Clinic Record"):
+        with st.form("clinic_add_form"):
+            ptype = st.selectbox("Person Type", ["Student","Staff"])            
+            name = st.text_input("Name")
+            class_color = st.selectbox("Class (for students)", options=[""] + st.session_state.get('classes', []))
+            case_desc = st.text_area("Case Description (short)")
+            treatment_desc = st.text_area("Treatment / Notes")
+            if st.form_submit_button("Add Clinic Record"):
+                if not name.strip():
+                    st.error("Please provide a name")
+                else:
+                    st.session_state.clinic_records.append({
+                        'date': record_date,
+                        'person_type': ptype.lower(),
+                        'name': name.strip(),
+                        'class': class_color,
+                        'case': case_desc.strip(),
+                        'treatment': treatment_desc.strip()
+                    })
+                    st.success("Clinic record added")
+                    st.rerun()
+
+    st.markdown("---")
+
+    # Filter records by search and date
+    records = st.session_state.clinic_records
+    if search_q:
+        q = search_q.strip().lower()
+        records = [r for r in records if q in r['name'].lower() or q in r.get('class','').lower()]
+
+    # Today's list
+    st.subheader(f"📋 Clinic Records for {record_date}")
+    todays = [r for r in records if r['date'] == record_date]
+    if todays:
+        for r in todays:
+            st.markdown(f"**{r['name']}** — {r['person_type'].title()} — {r.get('class','')}\n\nCase: {r['case']}\n\nTreatment: {r['treatment']}")
+            st.markdown("---")
+    else:
+        st.info("No clinic entries for this date")
+
+    # Daily report (summary counts)
+    st.markdown("---")
+    st.subheader("📈 Daily / Weekly / Monthly Reports")
+    today = datetime.date.today()
+    # Daily summary
+    day_records = [r for r in st.session_state.clinic_records if r['date'] == today]
+    st.write(f"Today: {len(day_records)} records")
+
+    # Weekly
+    week_start = today - datetime.timedelta(days=6)
+    week_records = [r for r in st.session_state.clinic_records if week_start <= r['date'] <= today]
+    st.write(f"Last 7 days: {len(week_records)} records")
+    if week_records:
+        df_week = pd.DataFrame(week_records)
+        st.dataframe(df_week[['date','person_type','name','class','case','treatment']], use_container_width=True)
+
+    # Monthly
+    month_start = today.replace(day=1)
+    month_records = [r for r in st.session_state.clinic_records if r['date'] >= month_start and r['date'] <= today]
+    st.write(f"This month: {len(month_records)} records")
+    if month_records:
+        df_month = pd.DataFrame(month_records)
+        st.dataframe(df_month[['date','person_type','name','class','case','treatment']], use_container_width=True)
+
+    # Download options: CSV and XLSX (try to produce XLSX in-memory)
+    st.markdown("---")
+    st.subheader("📥 Download Reports")
+    if st.button("Download CSV for Month"):
+        if month_records:
+            df = pd.DataFrame(month_records)
+            csv = df.to_csv(index=False)
+            b64 = base64.b64encode(csv.encode()).decode()
+            href = f'<a href="data:file/csv;base64,{b64}" download="clinic_month_records.csv">📥 Download clinic_month_records.csv</a>'
+            st.markdown(href, unsafe_allow_html=True)
+        else:
+            st.info("No records to download for this month")
+
+    if st.button("Download XLSX for Month"):
+        if month_records:
+            try:
+                import openpyxl  # noqa: F401
+                df = pd.DataFrame(month_records)
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False, sheet_name='ClinicRecords')
+                data = output.getvalue()
+                b64 = base64.b64encode(data).decode()
+                href = f'<a href="data:application/octet-stream;base64,{b64}" download="clinic_month_records.xlsx">📥 Download clinic_month_records.xlsx</a>'
+                st.markdown(href, unsafe_allow_html=True)
+            except Exception as e:
+                st.error("Failed to create XLSX. Make sure openpyxl is installed. Falling back to CSV.")
+                df = pd.DataFrame(month_records)
+                csv = df.to_csv(index=False)
+                b64 = base64.b64encode(csv.encode()).decode()
+                href = f'<a href="data:file/csv;base64,{b64}" download="clinic_month_records.csv">📥 Download clinic_month_records.csv</a>'
+                st.markdown(href, unsafe_allow_html=True)
+        else:
+            st.info("No records to download for this month")
+
+
 
 def show_admin_attendance_review():
     st.subheader("🗂️ Monthly Attendance Review (Admin)")
