@@ -1,0 +1,8 @@
+[server]
+# Run headless on platforms
+headless = true
+# When embedding via an iframe you may need to disable CORS. This
+# weakens protections; only set to false if you understand the risks.
+enableCORS = false
+# If you prefer to configure port via CLI / PaaS env, omit the port here.
+# port = 8080
